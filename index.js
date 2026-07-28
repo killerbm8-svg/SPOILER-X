@@ -1,138 +1,97 @@
-import express from 'express';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, delay } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
+import config from './settings.js';
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-const BOT_NAME = "SPOILER-X";
-
-// Helper function to clean up session folders after use
-function deleteFolderRecursive(directoryPath) {
-    if (fs.existsSync(directoryPath)) {
-        fs.readdirSync(directoryPath).forEach((file) => {
-            const curPath = path.join(directoryPath, file);
-            if (fs.lstatSync(curPath).isDirectory()) {
-                deleteFolderRecursive(curPath);
-            } else {
-                fs.unlinkSync(curPath);
-            }
-        });
-        fs.rmdirSync(directoryPath);
-    }
+// Ensure the auth folder exists
+const sessionPath = './session_data';
+if (!fs.existsSync(sessionPath)) {
+    fs.mkdirSync(sessionPath);
 }
 
-app.get('/', async (req, res) => {
-    const number = req.query.number;
-    if (!number) {
-        return res.send(`
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #121212; color: white; }
-                input { padding: 10px; font-size: 16px; border-radius: 5px; border: none; width: 250px; }
-                button { padding: 10px 20px; font-size: 16px; border-radius: 5px; border: none; background-color: #25D366; color: white; cursor: pointer; }
-            </style>
-            <h2>${BOT_NAME} Session Generator</h2>
-            <p>Enter your phone number with country code (e.g., 254712345678) to pair your bot:</p>
-            <form action="/" method="get">
-                <input type="text" name="number" placeholder="254712345678" required><br><br>
-                <button type="submit">Get Pairing Code</button>
-            </form>
-        `);
-    }
+// Extract and reconstruct login credentials from environment variable
+const sessionId = process.env.SESSION_ID;
+if (!sessionId) {
+    console.error("❌ CRITICAL ERROR: Environment variable 'SESSION_ID' is missing!");
+    process.exit(1);
+}
 
-    // Clean phone number format
-    const cleanedNumber = number.replace(/[^0-9]/g, '');
-    // Create an isolated temporary ID folder for this specific user request
-    const uniqueSessionId = `session_${Date.now()}_${cleanedNumber}`;
-    const sessionDir = path.join('./temp_sessions', uniqueSessionId);
+try {
+    const base64Data = sessionId.split('SPOILER-X~')[1];
+    if (!base64Data) throw new Error("Invalid Session ID format.");
+    const decryptedCreds = Buffer.from(base64Data, 'base64').toString('utf-8');
+    fs.writeFileSync(path.join(sessionPath, 'creds.json'), decryptedCreds);
+} catch (err) {
+    console.error("❌ Failed to decode your SESSION_ID string:", err.message);
+    process.exit(1);
+}
 
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
-        const sock = makeWASocket.default({
-            logger: pino({ level: 'silent' }),
-            auth: state,
-            printQRInTerminal: false
-        });
+    const sock = makeWASocket.default({
+        logger: pino({ level: 'silent' }),
+        auth: state,
+        printQRInTerminal: false
+    });
 
-        // Request pairing code instantly for this user
-        await delay(3000);
-        let code = await sock.requestPairingCode(cleanedNumber);
-
-        // Send the code to the user's web browser tab immediately
-        res.write(`
-            <style>
-                body { font-family: Arial, sans-serif; text-align: center; margin-top: 50px; background-color: #121212; color: white; }
-                .code { color: #3498db; font-family: monospace; font-size: 35px; letter-spacing: 4px; background: #222; padding: 10px; display: inline-block; border-radius: 5px; }
-            </style>
-            <h2>Your ${BOT_NAME} Pairing Code is:</h2>
-            <div class="code">${code}</div>
-            <p>Enter this code in WhatsApp -> Linked Devices -> Link with phone number</p>
-            <p style="color: #aaa;">Keep this web page open. Your Session ID will appear here shortly after you link your device...</p>
-        `);
-
-        // Monitor connection status specifically for this user's process
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
-
-            if (connection === 'open') {
-                try {
-                    await delay(5000); // Allow system keys to settle
-                    
-                    // Read the credentials file that WhatsApp just verified
-                    const credsContent = fs.readFileSync(path.join(sessionDir, 'creds.json'), 'utf-8');
-                    
-                    // Upload the creds raw content to a free online text bin (e.g., bin.scand.io or similar paste engine)
-                    // For this setup, we'll convert the file string into a secure Base64 token directly.
-                    // This creates a compact, single-line string users can easily copy-paste into Heroku/Render/Koyeb!
-                    const sessionBase64 = Buffer.from(credsContent).toString('base64');
-                    const finalSessionId = `SPOILER-X~${sessionBase64}`;
-
-                    // Send success notification directly inside their WhatsApp chat
-                    await sock.sendMessage(sock.user.id, { 
-                        text: `🎉 *SUCCESSFULLY CONNECTED TO ${BOT_NAME}* 🎉\n\nHere is your unique Session ID. Keep it secret!\n\n\`\`\`${finalSessionId}\`\`\n\nCopy this ID and use it in your environment deployment settings.` 
-                    });
-
-                    // Print the token directly onto the active webpage screen for them
-                    res.write(`
-                        <h2 style="color: #25D366;">🎉 Connection Successful!</h2>
-                        <p>Your Session ID has been sent to your WhatsApp saved messages!</p>
-                        <textarea style="width: 80%; height: 100px; font-family: monospace;" readonly>${finalSessionId}</textarea>
-                    `);
-                    res.end();
-
-                } catch (err) {
-                    res.write(`<p style="color:red;">Error saving session string: ${err.message}</p>`);
-                    res.end();
-                } finally {
-                    // Turn off this temporary background worker safely and wipe the folder
-                    sock.logout();
-                    deleteFolderRecursive(sessionDir);
-                }
-            }
-
-            if (connection === 'close') {
-                const reason = lastDisconnect?.error?.output?.statusCode;
-                if (reason === DisconnectReason.loggedOut) {
-                    res.write(`<p style="color:red;">Connection rejected by device.</p>`);
-                    res.end();
-                    deleteFolderRecursive(sessionDir);
-                }
-            }
-        });
-
-        sock.ev.on('creds.update', saveCreds);
-
-    } catch (error) {
-        if (!res.writableEnded) {
-            res.status(500).send(`System error processing pairing request: ${error.message}`);
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startBot();
+        } else if (connection === 'open') {
+            console.log(`\n🎉 [SPOILER-X] Successfully authenticated and online!`);
         }
-        deleteFolderRecursive(sessionDir);
-    }
-});
+    });
 
-app.listen(PORT, () => {
-    console.log(`Multi-pairing engine running smoothly on port ${PORT}`);
-});
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('messages.upsert', async (chatUpdate) => {
+        const msg = chatUpdate.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
+
+        const messageType = Object.keys(msg.message)[0];
+        let text = "";
+
+        if (messageType === 'conversation') text = msg.message.conversation;
+        else if (messageType === 'extendedTextMessage') text = msg.message.extendedTextMessage.text;
+
+        if (!text.startsWith(config.prefix)) return;
+
+        const from = msg.key.remoteJid;
+        const args = text.slice(config.prefix.length).trim().split(/ +/);
+        const command = args.shift().toLowerCase();
+
+        // Standard Bot Response Command Loops
+        try {
+            switch (command) {
+                case 'ping':
+                    await sock.sendMessage(from, { text: `🤖 *${config.botName}* is active and processing.` });
+                    break;
+                case 'menu':
+                case 'help':
+                    const uiText = `✨ *${config.botName} Dashboard* ✨\n\n` +
+                                   `• *Prefix:* [ ${config.prefix} ]\n` +
+                                   `• *Mode:* ${config.workMode}\n\n` +
+                                   `*Commands Available:*\n` +
+                                   `▫️ \`${config.prefix}ping\` - Verify uptime state\n` +
+                                   `▫️ \`${config.prefix}alive\` - Current health status\n` +
+                                   `▫️ \`${config.prefix}owner\` - Profile metadata`;
+                    await sock.sendMessage(from, { text: uiText });
+                    break;
+                case 'alive':
+                    await sock.sendMessage(from, { text: `System operational under *${config.ownerName}*'s parameters.` });
+                    break;
+                case 'owner':
+                    await sock.sendMessage(from, { text: `Bot creator registry matching phone signature: ${config.ownerNumber}` });
+                    break;
+            }
+        } catch (e) {
+            console.error("Command Execution Error:", e);
+        }
+    });
+}
+
+startBot();
