@@ -1,19 +1,27 @@
 import express from 'express';
-import makeWASocket, { useMultiFileAuthState, delay, DisconnectReason } from '@whiskeysockets/baileys';
+import baileysModule from '@whiskeysockets/baileys';
 import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
+
+// Safely extract the default socket function depending on the version layer
+const makeWASocket = baileysModule.default || baileysModule;
+const { useMultiFileAuthState, delay, DisconnectReason } = baileysModule;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 function cleanFolder(dirPath) {
     if (fs.existsSync(dirPath)) {
-        fs.readdirSync(dirPath).forEach((file) => {
-            const curPath = path.join(dirPath, file);
-            if (!fs.lstatSync(curPath).isDirectory()) fs.unlinkSync(curPath);
-        });
-        fs.rmdirSync(dirPath);
+        try {
+            fs.readdirSync(dirPath).forEach((file) => {
+                const curPath = path.join(dirPath, file);
+                if (!fs.lstatSync(curPath).isDirectory()) fs.unlinkSync(curPath);
+            });
+            fs.rmdirSync(dirPath);
+        } catch (e) {
+            console.log("Cleanup handled: ", e.message);
+        }
     }
 }
 
@@ -41,7 +49,9 @@ app.get('/', async (req, res) => {
 
     try {
         const { state, saveCreds } = await useMultiFileAuthState(tempDir);
-        const sock = makeWASocket.default({
+        
+        // Use the safely extracted function
+        const sock = makeWASocket({
             logger: pino({ level: 'silent' }),
             auth: state,
             printQRInTerminal: false
@@ -87,10 +97,9 @@ app.get('/', async (req, res) => {
         sock.ev.on('creds.update', saveCreds);
 
     } catch (err) {
-        if (!res.writableEnded) res.status(500).send(`Error: ${err.message}`);
+        if (!res.writableEnded) res.status(500).send(`Error processing request: ${err.message}`);
         cleanFolder(tempDir);
     }
 });
 
 app.listen(PORT, () => console.log(`Generator web engine live on port ${PORT}`));
-
