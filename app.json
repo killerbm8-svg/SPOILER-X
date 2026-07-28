@@ -1,0 +1,15 @@
+{
+  "name": "SPOILER-X",
+  "description": "Custom Multi-Device Functional User Bot",
+  "repository": "https://github.com",
+  "logo": "https://graph.org",
+  "keywords": ["whatsapp", "userbot", "baileys"],
+  "env": {
+    "SESSION_ID": {
+      "description": "Your encrypted SPOILER-X~ authentication token string",
+      "required": true
+    }
+  },
+  "stack": "container"
+}
+
