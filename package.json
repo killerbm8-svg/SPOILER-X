@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
+    "axios": "^1.7.2",
     "express": "^4.19.2",
     "mongoose": "^8.5.1",
     "pino": "^9.0.0"
